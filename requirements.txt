@@ -1,0 +1,6 @@
+apache-airflow==2.8.2
+apache-airflow-providers-mysql==5.5.3
+apache-airflow-providers-postgres==5.10.1
+pandas==1.4.4
+mysql-connector-python==8.3.0
+psycopg2-binary==2.9.9
