@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from airflow import DAG
+from airflow.utils.task_group import TaskGroup
 from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.operators.mysql import MySqlOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -8,6 +9,9 @@ import pandas as pd
 
 def transform_data(**kwargs):
     mysql_data = kwargs['task_instance'].xcom_pull(task_ids='extract_task')
+    print(f'kwargs = {kwargs}')
+    print(f'kwargs[ti] = {kwargs["ti"]}')
+    print(f'kwargs[task_instance] = {kwargs["task_instance"]}')
     
     transformed_data = []
     for record in mysql_data:
@@ -69,12 +73,21 @@ with DAG(
     catchup=False
 ) as dag:
     
-    extract_task = MySqlOperator(
-        task_id='extract_task',
-        mysql_conn_id='mysql_showhuay',
-        sql='SELECT * FROM user',
-        dag=dag,
-    )
+    with TaskGroup(group_id='extract_task') as extract_task:
+        
+        extract_users_task = MySqlOperator(
+            task_id='extract_users_task',
+            mysql_conn_id='mysql_showhuay',
+            sql='SELECT * FROM user',
+            dag=dag,
+        )
+        
+        extract_products_task = MySqlOperator(
+            task_id='extract_products_task',
+            mysql_conn_id='mysql_showhuay',
+            sql='SELECT * FROM product',
+            dag=dag,
+        )
     
     transform_task = PythonOperator(
         task_id='transform_task',
