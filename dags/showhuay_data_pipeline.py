@@ -22,7 +22,7 @@ def transform_users_data(**kwargs):
     transformed_data = []
     for record in mysql_data:
         transformed_record = {
-            'user_id': str(record[0]),
+            'user_id': record[0],
             'username': record[1],
             'email': record[2],
             'first_name': record[3],
@@ -69,8 +69,43 @@ def transform_products_data(**kwargs):
     
     return transformed_data_filledna
 
+def transform_orders_data(**kwargs):
+    mysql_data = kwargs['task_instance'].xcom_pull(task_ids='extract_task.extract_orders_task')
+    
+    transformed_data = []
+    for record in mysql_data:
+        transformed_record = {
+            'order_id': record[0],
+            'user_id': record[1],
+            'product_id': record[2],
+            'product_name': record[3],
+            'price': record[4],
+            'quantity': record[5],
+            'total_price': record[6],
+            'purchase_timestamp': record[7],
+            'payment_timestamp': record[8],
+        }
+        transformed_data.append(transformed_record)
+        
+    df = pd.DataFrame(transformed_data)
+    
+    dt_string = datetime.now().strftime('%d-%m-%Y %H:%i:%s')
+    
+    df['user_id'].fillna('N/A', inplace=True)
+    df['product_id'].fillna('N/A', inplace=True)
+    df['product_name'].fillna('N/A', inplace=True)
+    df['price'].fillna(0, inplace=True)
+    df['quantity'].fillna(0, inplace=True)
+    df['total_price'].fillna(0, inplace=True)
+    df['purchase_timestamp'].fillna(dt_string, inplace=True)
+    df['payment_timestamp'].fillna(dt_string, inplace=True)
+    
+    transformed_data_filledna = df.to_dict(orient='records')
+    
+    return transformed_data_filledna
+
 #  CREATE TABLE IF NOT EXISTS users (
-#    user_id VARCHAR(255),
+#    user_id VARCHAR(255) PRIMARY KEY,
 #    username VARCHAR(255),
 #    email VARCHAR(255),
 #    first_name VARCHAR(255),
@@ -84,15 +119,18 @@ def load_users_data(**kwargs):
 
     insert_query = """
     INSERT INTO public.users (user_id, username, email, first_name, last_name, mobile_number)
-    VALUES (%s, %s, %s, %s, %s, %s);
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (user_id) DO NOTHING;
     """
     
-    parameters = [(record['user_id'], record['username'], record['email'], record['first_name'], record['last_name'], record['mobile_number']) for record in transformed_data_filledna]
+    parameters = [(record['user_id'], record['username'], record['email'], record['first_name'],
+                   record['last_name'], record['mobile_number']) 
+                   for record in transformed_data_filledna]
     for parameter in parameters:
         postgres_hook.run(insert_query, parameters=parameter)
         
 #  CREATE TABLE IF NOT EXISTS products (
-#    product_id VARCHAR(255),
+#    product_id VARCHAR(255) PRIMARY KEY,
 #    user_id VARCHAR(255),
 #    category_name VARCHAR(255),
 #    product_name VARCHAR(255),
@@ -106,10 +144,42 @@ def load_products_data(**kwargs):
     
     insert_query = """
     INSERT INTO public.products (product_id, user_id, category_name, product_name, product_description, price)
-    VALUES (%s, %s, %s, %s, %s, %s);
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (product_id) DO NOTHING;
     """
     
-    parameters = [(record['product_id'], record['user_id'], record['category_name'], record['product_name'], record['product_description'], record['price']) for record in transform_data_filledna]
+    parameters = [(record['product_id'], record['user_id'], record['category_name'], record['product_name'],
+                   record['product_description'], record['price']) 
+                   for record in transform_data_filledna]
+    for parameter in parameters:
+        postgres_hook.run(insert_query, parameters=parameter)
+        
+#  CREATE TABLE IF NOT EXISTS orders (
+#    order_id VARCHAR(255),
+#    user_id VARCHAR(255), 
+#    product_id VARCHAR(255),
+#    product_name VARCHAR(255),
+#    price double precision,
+#    quantity int,
+#    total_price double precision,
+#    purchase_timestamp timestamp,
+#    payment_timestamp timestamp,
+#    PRIMARY KEY (order_id, product_id)
+#  );
+def load_orders_data(**kwargs):
+    transformed_data_filledna = kwargs['task_instance'].xcom_pull(task_ids='transform_task.transform_orders_task')
+    
+    postgres_hook = PostgresHook(postgres_conn_id='postgres_showhuay')
+    
+    insert_query = """
+    INSERT INTO public.orders (order_id, user_id, product_id, product_name, price, quantity, total_price, purchase_timestamp, payment_timestamp)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (order_id, product_id) DO NOTHING;
+    """
+    
+    parameters = [(record['order_id'], record['user_id'], record['product_id'], record['product_name'], record['price'],
+                   record['quantity'], record['total_price'], record['purchase_timestamp'], record['payment_timestamp']) 
+                   for record in transformed_data_filledna]
     for parameter in parameters:
         postgres_hook.run(insert_query, parameters=parameter)
     
@@ -133,14 +203,33 @@ with DAG(
         extract_users_task = MySqlOperator(
             task_id='extract_users_task',
             mysql_conn_id='mysql_showhuay',
-            sql='SELECT user_id, username, email, fname, lname, telephone_number FROM user',
+            sql='SELECT user_id, username, email, fname, lname, telephone_number FROM user;',
             dag=dag,
         )
         
         extract_products_task = MySqlOperator(
             task_id='extract_products_task',
             mysql_conn_id='mysql_showhuay',
-            sql='SELECT product_id, user_id, category_id, product_name, product_description, price FROM product',
+            sql='SELECT product_id, user_id, category_id, product_name, product_description, price FROM product;',
+            dag=dag,
+        )
+        
+        extract_orders_task = MySqlOperator(
+            task_id='extract_orders_task',
+            mysql_conn_id='mysql_showhuay',
+            sql="""
+            SELECT 
+            p1.purchase_id, p1.user_id, p2.product_id, p3.product_name, p3.price, 
+            p2.quantity, p3.price * p2.quantity AS total_price, 
+            DATE_FORMAT(p1.purchase_timestamp, '%d-%m-%Y %H:%i:%s') AS formatted_purchase_timestamp,
+            DATE_FORMAT(p1.payment_timestamp, '%d-%m-%Y %H:%i:%s') AS formatted_payment_timestamp
+            FROM 
+            purchase p1
+            LEFT JOIN 
+            purchase_product p2 on p1.purchase_id = p2.purchase_id
+            LEFT JOIN 
+            product p3 on p2.product_id = p3.product_id;
+            """,
             dag=dag,
         )
         
@@ -158,6 +247,12 @@ with DAG(
             dag=dag,
         )
         
+        transform_orders_task = PythonOperator(
+            task_id='transform_orders_task',
+            python_callable=transform_orders_data,
+            dag=dag,
+        )
+        
     with TaskGroup(group_id='load_task') as load_task:
             
         load_users_task = PythonOperator(
@@ -170,6 +265,12 @@ with DAG(
             task_id='load_products_task',
             python_callable=load_products_data,
             dag=dag
+        )
+        
+        load_orders_task = PythonOperator(
+            task_id='load_orders_task',
+            python_callable=load_orders_data,
+            dag=dag,
         )
     
     extract_task >> transform_task >> load_task
