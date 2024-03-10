@@ -104,8 +104,43 @@ def transform_orders_data(**kwargs):
     
     return transformed_data_filledna
 
+def transform_reviews_data(**kwargs):
+    mysql_data = kwargs['task_instance'].xcom_pull(task_ids='extract_task.extract_reviews_task')
+    
+    transformed_data = []
+    for record in mysql_data:
+        transformed_record = {
+            'review_id': record[0],
+            'order_id': record[1],
+            'product_id': record[2],
+            'product_name': record[3],
+            'user_id': record[4],
+            'username': record[5],
+            'review_score': record[6],
+            'review_text': record[7],
+            'review_timestamp': record[8],
+        }
+        transformed_data.append(transformed_record)
+        
+    df = pd.DataFrame(transformed_data)
+    
+    dt_string = datetime.now().strftime('%d-%m-%Y %H:%i:%s')
+    
+    df['order_id'].fillna('N/A', inplace=True)
+    df['product_id'].fillna('N/A', inplace=True)
+    df['product_name'].fillna('N/A', inplace=True)
+    df['user_id'].fillna('N/A', inplace=True)
+    df['username'].fillna('N/A', inplace=True)
+    df['review_score'].fillna(0, inplace=True)
+    df['review_text'].fillna('N/A', inplace=True)
+    df['review_timestamp'].fillna(dt_string, inplace=True)
+    
+    transformed_data_filledna = df.to_dict(orient='records')
+    
+    return transformed_data_filledna
+
 #  CREATE TABLE IF NOT EXISTS users (
-#    user_id VARCHAR(255) PRIMARY KEY,
+#    user_id int PRIMARY KEY,
 #    username VARCHAR(255),
 #    email VARCHAR(255),
 #    first_name VARCHAR(255),
@@ -130,8 +165,8 @@ def load_users_data(**kwargs):
         postgres_hook.run(insert_query, parameters=parameter)
         
 #  CREATE TABLE IF NOT EXISTS products (
-#    product_id VARCHAR(255) PRIMARY KEY,
-#    user_id VARCHAR(255),
+#    product_id int PRIMARY KEY,
+#    user_id int,
 #    category_name VARCHAR(255),
 #    product_name VARCHAR(255),
 #    product_description text,
@@ -155,14 +190,14 @@ def load_products_data(**kwargs):
         postgres_hook.run(insert_query, parameters=parameter)
         
 #  CREATE TABLE IF NOT EXISTS orders (
-#    order_id VARCHAR(255),
-#    user_id VARCHAR(255), 
-#    product_id VARCHAR(255),
+#    order_id int,
+#    user_id int, 
+#    product_id int,
 #    product_name VARCHAR(255),
 #    price double precision,
 #    quantity int,
 #    total_price double precision,
-#    purchase_timestamp timestamp,
+#    purchase_timestamp timestamp,  
 #    payment_timestamp timestamp,
 #    PRIMARY KEY (order_id, product_id)
 #  );
@@ -179,6 +214,35 @@ def load_orders_data(**kwargs):
     
     parameters = [(record['order_id'], record['user_id'], record['product_id'], record['product_name'], record['price'],
                    record['quantity'], record['total_price'], record['purchase_timestamp'], record['payment_timestamp']) 
+                   for record in transformed_data_filledna]
+    for parameter in parameters:
+        postgres_hook.run(insert_query, parameters=parameter)
+        
+#  CREATE TABLE IF NOT EXISTS reviews (
+#    review_id int,
+#    order_id int, 
+#    product_id int,
+#    product_name VARCHAR(255),
+#    user_id int,
+#    username VARCHAR(255),
+#    review_score int,
+#    review_text text,
+#    review_timestamp timestamp,
+#    PRIMARY KEY (review_id, order_id, product_id)
+#  );
+def load_reviews_data(**kwargs):
+    transformed_data_filledna = kwargs['task_instance'].xcom_pull(task_ids='transform_task.transform_reviews_task')
+    
+    postgres_hook = PostgresHook(postgres_conn_id='postgres_showhuay')
+    
+    insert_query = """
+    INSERT INTO public.reviews (review_id, order_id, product_id, product_name, user_id, username, review_score, review_text, review_timestamp)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (review_id, order_id, product_id) DO NOTHING;
+    """
+    
+    parameters = [(record['review_id'], record['order_id'], record['product_id'], record['product_name'], record['user_id'],
+                   record['username'], record['review_score'], record['review_text'], record['review_timestamp'])
                    for record in transformed_data_filledna]
     for parameter in parameters:
         postgres_hook.run(insert_query, parameters=parameter)
@@ -203,14 +267,24 @@ with DAG(
         extract_users_task = MySqlOperator(
             task_id='extract_users_task',
             mysql_conn_id='mysql_showhuay',
-            sql='SELECT user_id, username, email, fname, lname, telephone_number FROM user;',
+            sql="""
+            SELECT 
+            user_id, username, email, fname, lname, telephone_number 
+            FROM 
+            user;
+            """,
             dag=dag,
         )
         
         extract_products_task = MySqlOperator(
             task_id='extract_products_task',
             mysql_conn_id='mysql_showhuay',
-            sql='SELECT product_id, user_id, category_id, product_name, product_description, price FROM product;',
+            sql="""
+            SELECT 
+            product_id, user_id, category_id, product_name, product_description, price 
+            FROM 
+            product;
+            """,
             dag=dag,
         )
         
@@ -229,6 +303,26 @@ with DAG(
             purchase_product p2 on p1.purchase_id = p2.purchase_id
             LEFT JOIN 
             product p3 on p2.product_id = p3.product_id;
+            """,
+            dag=dag,
+        )
+        
+        extract_reviews_task = MySqlOperator(
+            task_id='extract_reviews_task',
+            mysql_conn_id='mysql_showhuay',
+            sql="""
+            SELECT
+            p1.review_id, pp.purchase_id, p1.product_id, p2.product_name, p1.user_id,
+            u.username, p1.review_score, p1.review_text,
+            DATE_FORMAT(p1.review_timestamp, '%d-%m-%Y %H:%i:%s') AS formatted_review_timestamp
+            FROM
+            product_review p1
+            LEFT JOIN
+            purchase_product pp on p1.product_id = pp.product_id
+            LEFT JOIN
+            product p2 on p1.product_id = p2.product_id
+            LEFT JOIN
+            user u on p1.user_id = u.user_id;
             """,
             dag=dag,
         )
@@ -253,6 +347,12 @@ with DAG(
             dag=dag,
         )
         
+        transform_reviews_task = PythonOperator(
+            task_id='transform_reviews_task',
+            python_callable=transform_reviews_data,
+            dag=dag,
+        )
+        
     with TaskGroup(group_id='load_task') as load_task:
             
         load_users_task = PythonOperator(
@@ -270,6 +370,12 @@ with DAG(
         load_orders_task = PythonOperator(
             task_id='load_orders_task',
             python_callable=load_orders_data,
+            dag=dag,
+        )
+        
+        load_reviews_task = PythonOperator(
+            task_id='load_reviews_task',
+            python_callable=load_reviews_data,
             dag=dag,
         )
     
